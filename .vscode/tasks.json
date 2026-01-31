@@ -1,0 +1,42 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "build"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": "$gcc",
+            "dependsOn": "cmake configure"
+        },
+        {
+            "label": "cmake configure",
+            "type": "process",
+            "command": "cmake",
+            "args": [
+                "-S", ".",
+                "-B", "build"
+            ],
+            "windows": {
+                "args": [
+                    "-S", ".",
+                    "-B", "build",
+                    "-G", "MinGW Makefiles"
+                ]
+            },
+            "linux": {
+                "args": [
+                    "-S", ".",
+                    "-B", "build"
+                ]
+            }
+        }
+    ]
+}
