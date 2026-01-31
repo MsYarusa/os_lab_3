@@ -28,6 +28,7 @@ const char* MUTEX_COUNTER = "lab_3_counter_mutex";
 
 struct SharedData {
     long long counter;
+    long long master_pid;
 };
 
 SharedData* shared_data = nullptr;
@@ -106,9 +107,12 @@ pid_t spawn_copy(const std::string& arg) {
     pid_t pid = fork();
     if (pid == 0) {
         char cmd[1024];
-        readlink("/proc/self/exe", cmd, sizeof(cmd)-1);
-        execl(cmd, cmd, arg.c_str(), NULL);
-        exit(0);
+        ssize_t len = readlink("/proc/self/exe", cmd, sizeof(cmd) - 1);
+        if (len != -1) {
+            cmd[len] = '\0';
+            execl(cmd, cmd, arg.c_str(), (char*)NULL);
+        }
+        _exit(0);
     }
     return pid;
 }
@@ -127,8 +131,17 @@ int main(int argc, char* argv[]) {
     hMasterMutex = CreateMutexA(NULL, FALSE, "Local\\Lab3MasterMutex");
 #else
     shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    ftruncate(shm_fd, sizeof(SharedData));
-    shared_data = (SharedData*)mmap(0, sizeof(SharedData), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+   
+    struct stat st;
+    fstat(shm_fd, &st);
+    if (st.st_size == 0) {
+        ftruncate(shm_fd, sizeof(SharedData));
+
+        shared_data = (SharedData*)mmap(0, sizeof(SharedData), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+        memset(shared_data, 0, sizeof(SharedData));
+    } else {
+        shared_data = (SharedData*)mmap(0, sizeof(SharedData), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    }
     sem_master = sem_open(SEM_MASTER, O_CREAT, 0666, 1);
 #endif
 
@@ -168,6 +181,8 @@ int main(int argc, char* argv[]) {
 
     while (true) {
         auto now = std::chrono::steady_clock::now();
+        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
 
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_300ms).count() >= 300) {
             modify_counter(1);
@@ -177,7 +192,46 @@ int main(int argc, char* argv[]) {
 #ifdef _WIN32
         is_master = (WaitForSingleObject(hMasterMutex, 0) == WAIT_OBJECT_0);
 #else
-        is_master = (sem_trywait(sem_master) == 0);
+   if (!is_master) {
+        // 1. Сначала просто пробуем замок. Если он открыт — мы везунчики.
+        if (sem_trywait(sem_master) == 0) {
+            is_master = true;
+            shared_data->master_pid = getpid();
+            write_log("I am the new Master (clean catch)!");
+        } else {
+            // 2. Если замок закрыт, проверяем хозяина
+            long long current_master_pid = shared_data->master_pid;
+
+            // Если хозяин в памяти есть, и он мертв (kill == -1)
+            if (current_master_pid > 0 && kill(current_master_pid, 0) == -1) {
+                
+                // --- АТОМАРНАЯ ЗАЩИТА ---
+                // Пытаемся заменить PID мертвого мастера на СВОЙ PID
+                // Если функция вернет true, значит МЫ БЫЛИ ПЕРВЫМИ, кто это сделал.
+                if (__sync_bool_compare_and_swap(&shared_data->master_pid, current_master_pid, getpid())) {
+                    
+                    write_log("Detected dead master (" + std::to_string(current_master_pid) + "). I am taking over!");
+                    
+                    // Только МЫ имеем право починить семафор, так как мы выиграли гонку PID-ов
+                    int val;
+                    sem_getvalue(sem_master, &val);
+                    while (val <= 0) {
+                        sem_post(sem_master); // Возвращаем в 1
+                        sem_getvalue(sem_master, &val);
+                    }
+                    
+                    // Теперь забираем его себе
+                    sem_trywait(sem_master);
+                    is_master = true;
+                }
+                // Все остальные рабы проиграют compare_and_swap, так как 
+                // shared_data->master_pid уже не будет равен current_master_pid
+            }
+        }
+    } else {
+        // Я мастер, подтверждаю свое присутствие
+        shared_data->master_pid = getpid();
+    }
 #endif
 
         if (is_master) {
@@ -205,6 +259,14 @@ int main(int argc, char* argv[]) {
 
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
+
+#ifndef _WIN32
+    if (is_master) {
+        sem_close(sem_master);
+        sem_unlink(SEM_MASTER);
+        shm_unlink(SHM_NAME);
+    }
+#endif
 
     return 0;
 }
