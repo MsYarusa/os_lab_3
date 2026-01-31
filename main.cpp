@@ -193,43 +193,32 @@ int main(int argc, char* argv[]) {
         is_master = (WaitForSingleObject(hMasterMutex, 0) == WAIT_OBJECT_0);
 #else
    if (!is_master) {
-        // 1. Сначала просто пробуем замок. Если он открыт — мы везунчики.
         if (sem_trywait(sem_master) == 0) {
             is_master = true;
             shared_data->master_pid = getpid();
-            write_log("I am the new Master (clean catch)!");
+            write_log("I am the new Master!");
         } else {
-            // 2. Если замок закрыт, проверяем хозяина
             long long current_master_pid = shared_data->master_pid;
 
-            // Если хозяин в памяти есть, и он мертв (kill == -1)
             if (current_master_pid > 0 && kill(current_master_pid, 0) == -1) {
                 
-                // --- АТОМАРНАЯ ЗАЩИТА ---
-                // Пытаемся заменить PID мертвого мастера на СВОЙ PID
-                // Если функция вернет true, значит МЫ БЫЛИ ПЕРВЫМИ, кто это сделал.
                 if (__sync_bool_compare_and_swap(&shared_data->master_pid, current_master_pid, getpid())) {
                     
                     write_log("Detected dead master (" + std::to_string(current_master_pid) + "). I am taking over!");
                     
-                    // Только МЫ имеем право починить семафор, так как мы выиграли гонку PID-ов
                     int val;
                     sem_getvalue(sem_master, &val);
                     while (val <= 0) {
-                        sem_post(sem_master); // Возвращаем в 1
+                        sem_post(sem_master);
                         sem_getvalue(sem_master, &val);
                     }
                     
-                    // Теперь забираем его себе
                     sem_trywait(sem_master);
                     is_master = true;
                 }
-                // Все остальные рабы проиграют compare_and_swap, так как 
-                // shared_data->master_pid уже не будет равен current_master_pid
             }
         }
     } else {
-        // Я мастер, подтверждаю свое присутствие
         shared_data->master_pid = getpid();
     }
 #endif
