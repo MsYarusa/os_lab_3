@@ -2,5 +2,5 @@
 
 Для просмотра логов в режиме реально времени можно воспользоваться следующими командами:
 
-Для Windows: Get-Content lab3.log -Wait -Tail 10
-Для Linux: tail -f lab3.log
+Для Windows: Get-Content lab_3.log -Wait -Tail 10
+Для Linux: tail -f lab_3.log
